@@ -1,0 +1,10 @@
+[package]
+name = "pot-core"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR APACHE-2.0"
+
+# No dependencies on purpose: this crate takes numbers in, returns numbers
+# out. Keeping it dependency-free is what makes it trivial to unit test on
+# the host and reuse if you ever port this project to a different MCU.
+[dependencies]
