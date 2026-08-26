@@ -25,7 +25,7 @@ pub fn raw_to_percent(raw: u16, min: u16, max: u16) -> u8 {
     let span = (high - low) as u32;
     let offset = (clamped - low) as u32;
     let res = (offset * 100) / span;
-    let pct = if inv {100 - res} else { res };
+    let pct = if inv { 100 - res } else { res };
 
     pct as u8
 }
@@ -35,24 +35,23 @@ pub fn raw_to_percent(raw: u16, min: u16, max: u16) -> u8 {
 /// values smooth harder but respond to real changes more slowly.
 #[derive(Copy, Clone)]
 pub struct Ema {
-    alpha : f32,
-    value: Option<f32>
+    alpha: f32,
+    value: Option<f32>,
 }
 
 impl Ema {
     pub const fn new(alpha: f32) -> Self {
-        Self { alpha , value:None }
+        Self { alpha, value: None }
     }
 
-    pub fn update(&mut self, sample: f32)-> f32 {
+    pub fn update(&mut self, sample: f32) -> f32 {
         let filtered = match self.value {
-            None => sample , //first value , nothing to average against
-            Some(prev) => prev + self.alpha * (sample - prev)
+            None => sample, //first value , nothing to average against
+            Some(prev) => prev + self.alpha * (sample - prev),
         };
         self.value = Some(filtered);
         filtered
     }
-
 }
 
 #[cfg(test)]
@@ -100,7 +99,9 @@ mod tests {
         for _ in 0..50 {
             last = ema.update(100.0);
         }
-        assert!((last - 100.0).abs() < 1.0, "expected convergence near 100, got {last}");
+        assert!(
+            (last - 100.0).abs() < 1.0,
+            "expected convergence near 100, got {last}"
+        );
     }
 }
-
