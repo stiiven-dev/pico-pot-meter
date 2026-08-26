@@ -8,9 +8,9 @@
 /// - `min > max`: inverted pot (wired backwards, or CCW = 100%) — this is
 ///   just `min`/`max` swapped from the caller's point of view, and the
 ///   math below handles it without a separate code path.
-/// Always clamps to 0..=100, so a raw reading outside the calibrated
-/// range (noise, or calibration that didn't quite reach the physical
-/// stop) never produces a nonsense percentage.
+///   Always clamps to 0..=100, so a raw reading outside the calibrated
+///   range (noise, or calibration that didn't quite reach the physical
+///   stop) never produces a nonsense percentage.
 pub fn raw_to_percent(raw: u16, min: u16, max: u16) -> u8 {
     if min == max {
         return 0;

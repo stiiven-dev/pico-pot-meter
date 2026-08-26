@@ -18,6 +18,7 @@ use hal::{
 };
 use rp2040_hal::{self as hal, adc::AdcPin, rom_data, Adc};
 
+use pot_core::/*raw_to_percent,*/ Ema;
 use usb_device::{class_prelude::*, prelude::*};
 use usbd_serial::SerialPort;
 
@@ -28,6 +29,11 @@ static USB_STATE: Mutex<RefCell<Option<UsbState>>> = Mutex::new(RefCell::new(Non
 const DEBOUNCE_TICKS: u64 = 20_000;
 const MULTI_CLICKS_WINDOW_TICKS: u64 = 400_000;
 const HOLD_TICKS: u64 = 1_500_000;
+//Other consts
+const OVERSAMPLE_COUNT: u32 = 32;
+const ALPHA: f32 = 0.2;
+//const PRINT_RATE: u64 = 500_000;
+const MEDIAN_WINDOW: usize = 5;
 
 struct DefmtUsbWriter;
 
@@ -37,17 +43,20 @@ impl embedded_io::ErrorType for DefmtUsbWriter {
 
 impl embedded_io::Write for DefmtUsbWriter {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
-        critical_section::with(|cs| {
-            if let Some((usb_dev, serial)) = USB_STATE.borrow_ref_mut(cs).as_mut() {
-                usb_dev.poll(&mut [serial]);
-                match serial.write(buf) {
-                    Ok(n) => Ok(n),
-                    Err(_) => Ok(buf.len()),
+        let mut written = 0;
+        while written < buf.len() {
+            critical_section::with(|cs| {
+                if let Some((usb_dev, serial)) = USB_STATE.borrow_ref_mut(cs).as_mut() {
+                    usb_dev.poll(&mut [serial]);
+                    match serial.write(&buf[written..]) {
+                        Ok(n) => written += n,
+                        Err(UsbError::WouldBlock) => {} // try again next loop
+                        Err(_) => return, // real error, give up on this frame
+                    }
                 }
-            } else {
-                Ok(buf.len())
-            }
-        })
+            });
+        }
+        Ok(written)
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {
@@ -58,12 +67,22 @@ impl embedded_io::Write for DefmtUsbWriter {
 fn wait_for_usb_settle(timer: &Timer, settle_ticks: u64) {
     let start = timer.get_counter().ticks();
     while timer.get_counter().ticks() - start < settle_ticks {
-        critical_section::with(|cs| {
-            if let Some((usb_dev, serial)) = USB_STATE.borrow_ref_mut(cs).as_mut() {
-                usb_dev.poll(&mut [serial]);
-            }
-        });
+        poll_usb();
     }
+}
+
+fn poll_usb() {
+    critical_section::with(|cs| {
+        if let Some((usb_dev, serial)) = USB_STATE.borrow_ref_mut(cs).as_mut() {
+            usb_dev.poll(&mut [serial]);
+        }
+    });
+}
+
+fn median_of(buf: &[u16; MEDIAN_WINDOW]) -> u16 {
+    let mut sorted = *buf;
+    sorted.sort_unstable();
+    sorted[MEDIAN_WINDOW / 2]
 }
 
 static WRITER: StaticCell<DefmtUsbWriter> = StaticCell::new();
@@ -95,8 +114,8 @@ fn main() -> ! {
         &mut pac.RESETS,
         &mut watchdog,
     )
-    .ok()
-    .unwrap();
+        .ok()
+        .unwrap();
 
     //SIO gives access to GPIO
     let sio = Sio::new(pac.SIO);
@@ -114,7 +133,7 @@ fn main() -> ! {
 
     //enable Adc pin 0 and 1
     let mut adc_pin0 = AdcPin::new(pins.gpio26.into_floating_input()).unwrap();
-    let mut adc_pin1 = AdcPin::new(pins.gpio27.into_floating_input()).unwrap();
+    //let mut adc_pin1 = AdcPin::new(pins.gpio27.into_floating_input()).unwrap();
 
     //GPIO12 as button (pin 16)
     let button_pin = pins.gpio12.into_pull_up_input();
@@ -158,13 +177,17 @@ fn main() -> ! {
         HOLD_TICKS,
         now0,
     )
-    .unwrap();
+        .unwrap();
+    //median filtering
+    let mut median_buff: [u16; MEDIAN_WINDOW] = [0; MEDIAN_WINDOW];
+    let mut median_idx = 0;
+
+    //EMA init
+    let mut ema1 = Ema::new(ALPHA);
+    //will show info in slower rate so we can read
+    //let mut last_time = 0u64;
     loop {
-        critical_section::with(|cs| {
-            if let Some((usb_dev, serial)) = USB_STATE.borrow_ref_mut(cs).as_mut() {
-                usb_dev.poll(&mut [serial]);
-            }
-        });
+        poll_usb();
         let now = timer.get_counter().ticks();
         match button.update(now).unwrap() {
             ButtonEvent::HoldTriggered => {
@@ -175,11 +198,7 @@ fn main() -> ! {
                 // Give the USB writer a chance to flush the log line above
                 // before we reset (best-effort; no delay primitive wired
                 // in yet, so this is a very rough flush attempt).
-                critical_section::with(|cs| {
-                    if let Some((usb_dev, serial)) = USB_STATE.borrow_ref_mut(cs).as_mut() {
-                        usb_dev.poll(&mut [serial]);
-                    }
-                });
+                poll_usb();
                 rom_data::reset_to_usb_boot(0, 0);
             }
             ButtonEvent::Clicks(n) => {
@@ -187,9 +206,29 @@ fn main() -> ! {
             }
             ButtonEvent::None => {}
         }
-        let raw_val0 = adc.read(&mut adc_pin0).unwrap();
-        let raw_val1 = adc.read(&mut adc_pin1).unwrap();
+        //oversampling
+        let mut pot1_sum: u32 = 0; //u32 because worst case scenario is 131_040 which surpasses u16::MAX
 
-        defmt::info!("value 1 = {} and value 2 = {} ", raw_val0, raw_val1);
+        for _ in 0..OVERSAMPLE_COUNT {
+            let raw_val1 = adc.read(&mut adc_pin0).unwrap();
+            pot1_sum += raw_val1 as u32;
+        }
+        let pot1_raw = (pot1_sum / OVERSAMPLE_COUNT) as u16;
+        //moving median
+        median_buff[median_idx] = pot1_raw;
+        median_idx = (median_idx + 1) % MEDIAN_WINDOW;
+        let pot1_median = median_of(&median_buff);
+
+        //EMA
+        let pot1_smoothed = ema1.update(pot1_raw as f32);
+        //suppose min and max until calibration
+        //let pct1 = raw_to_percent(pot1_smoothed as u16, 0, 4095);
+        // let now = timer.get_counter().ticks();
+        // if now - last_time >= PRINT_RATE {
+        //     last_time = now;
+        //
+        // }
+        //doing it asap for plotting purposes
+        defmt::info!("PLOT raw={=u16} ema={=u16} median={=u16}", pot1_raw, pot1_smoothed as u16, pot1_median);
     }
 }

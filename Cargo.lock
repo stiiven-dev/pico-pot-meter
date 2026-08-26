@@ -744,6 +744,7 @@ dependencies = [
  "embedded-io 0.7.1",
  "panic-persist",
  "portable-atomic",
+ "pot-core",
  "rp2040-boot2",
  "rp2040-hal",
  "ssd1306",

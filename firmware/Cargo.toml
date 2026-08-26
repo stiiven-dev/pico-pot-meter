@@ -5,6 +5,7 @@ version = "0.1.1"
 license = "MIT or Apache-2.0"
 
 [dependencies]
+pot-core = { path = "../crates/pot-core" }
 cortex-m = "0.7.9"
 cortex-m-rt = "0.7"
 embedded-hal = { version = "1.0.0" }
@@ -77,3 +78,10 @@ debug-assertions = false
 incremental = false
 lto = 'fat'
 opt-level = 3
+
+#remove auto-test for ide
+[[bin]]
+name = "pico-pot-meter"
+path = "src/main.rs"
+test = false
+bench = false

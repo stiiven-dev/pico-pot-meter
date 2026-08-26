@@ -13,15 +13,17 @@ Two potentiometers driving an OLED bar-graph meter, with a calibration routine �
 ## Features
 
 - Two-pot bar-graph + numeric percentage on a 128×64 I²C OLED, ≥20 fps.
-- Calibration routine: hold the button at both physical extremes of a pot to store its min/max, so the meter reads 0–100% across whatever range the pot actually swings (handles inverted wiring too).
-- ADC oversampling + EMA filtering — see [`crates/pot-core`](crates/pot-core) for the pure, host-testable mapping/filter logic.
+- Calibration routine: hold the button at both physical extremes of a pot to store its min/max, so the meter reads
+  0–100% across whatever range the pot actually swings (handles inverted wiring too).
+- ADC oversampling + EMA filtering — see [`crates/pot-core`](crates/pot-core) for the pure, host-testable mapping/filter
+  logic.
 - Structured logging over USB-serial (`defmt-serial`) and crash capture (`panic-persist`), reused from `blinky-plus`.
 - Fully USB-only dev loop, same as every project in this series.
 
 ## To-Do list
 
 - [x] raw ADC read, logged over defmt
-- [ ] filter comparison: raw vs EMA vs median (pick one, document why in README)
+- [x] filter comparison: raw vs EMA vs median ([Filter choosing](#filter-choosing))
 - [ ] OLED bring-up + bar graph rendering
 - [ ] calibration routine (hold-both-extremes) + RAM persistence
 - [ ] host tests for `raw_to_percent` (clamping, inverted pot)
@@ -30,29 +32,30 @@ Two potentiometers driving an OLED bar-graph meter, with a calibration routine �
 
 ## Hardware
 
-| Part | Qty | Notes |
-| --- | --- | --- |
-| Raspberry Pi Pico W (or WH) | 1 | RP2040 + CYW43439 |
-| Potentiometer (10 kΩ) | 2 | |
-| SSD1306/SSD1309 0.96" 128×64 I²C OLED | 1 | |
-| Breadboard + jumper wires | — | |
-| USB micro-B cable | 1 | data-capable |
+| Part                                  | Qty | Notes             |
+|---------------------------------------|-----|-------------------|
+| Raspberry Pi Pico W (or WH)           | 1   | RP2040 + CYW43439 |
+| Potentiometer (10 kΩ)                 | 2   |                   |
+| SSD1306/SSD1309 0.96" 128×64 I²C OLED | 1   |                   |
+| Breadboard + jumper wires             | —   |                   |
+| USB micro-B cable                     | 1   | data-capable      |
 
 No debug probe needed — same USB-only workflow as `blinky-plus`.
 
 ## Wiring
 
-| Pico W pin | Signal | Notes |
-| --- | --- | --- |
-| GP26 (pin 31) | Pot #1 wiper | ADC0 |
-| GP27 (pin 32) | Pot #2 wiper | ADC1 |
-| GP4 (pin 6) | OLED SDA | I2C0 |
-| GP5 (pin 7) | OLED SCL | I2C0 |
-| 3V3 (pin 36) | Pot ends + OLED VCC | |
-| GND (pin 38) | Common ground | shared by both pots and OLED |
+| Pico W pin    | Signal              | Notes                        |
+|---------------|---------------------|------------------------------|
+| GP26 (pin 31) | Pot #1 wiper        | ADC0                         |
+| GP27 (pin 32) | Pot #2 wiper        | ADC1                         |
+| GP4 (pin 6)   | OLED SDA            | I2C0                         |
+| GP5 (pin 7)   | OLED SCL            | I2C0                         |
+| 3V3 (pin 36)  | Pot ends + OLED VCC |                              |
+| GND (pin 38)  | Common ground       | shared by both pots and OLED |
 
 <!-- TODO: docs/wiring.md with the full diagram -->
-No smoothing cap on the pot wipers in this build — filtering is done entirely in software (oversampling + EMA in `pot-core`); see that crate's docs for why.
+No smoothing cap on the pot wipers in this build — filtering is done entirely in software (oversampling + EMA in
+`pot-core`); see that crate's docs for why.
 
 ## Quickstart
 
@@ -73,7 +76,9 @@ Watch logs the same way as `blinky-plus`
 
 ### Calibration
 
-Hold the button while turning a pot to both of its physical extremes, release to store. Repeat per pot. Calibration lives in RAM only in this project (flash persistence is a later-project concept) — it resets on power-cycle, which is fine for a bring-up project and is called out explicitly rather than left as a surprise.
+Hold the button while turning a pot to both of its physical extremes, release to store. Repeat per pot. Calibration
+lives in RAM only in this project (flash persistence is a later-project concept) — it resets on power-cycle, which is
+fine for a bring-up project and is called out explicitly rather than left as a surprise.
 
 ## Architecture
 
@@ -85,7 +90,10 @@ pico-pot-meter/
     └── src/main.rs
 ```
 
-`pot-core` takes raw ADC counts + calibration bounds in, returns a clamped percentage out. It has no idea an RP2040 exists. That's deliberate — it's the piece you can actually step through with a real debugger on your laptop, which matters more here than usual since there's no SWD probe for the firmware side. `firmware/` stays thin: read ADC, call into `pot-core`, draw the result.
+`pot-core` takes raw ADC counts + calibration bounds in, returns a clamped percentage out. It has no idea an RP2040
+exists. That's deliberate — it's the piece you can actually step through with a real debugger on your laptop, which
+matters more here than usual since there's no SWD probe for the firmware side. `firmware/` stays thin: read ADC, call
+into `pot-core`, draw the result.
 
 ## Testing
 
@@ -97,10 +105,26 @@ cargo fmt --all -- --check
 
 `firmware/` has no host tests — ADC timing and OLED rendering need real hardware to verify.
 
+---
+
 ## Known limitations
 
 - Calibration is RAM-only; power-cycling loses it. Flash-backed calibration is a later-project concept.
-- No debug probe support — see [`blinky-plus`](../blinky-plus) for what that means in practice for this series.
+- No debug probe support — see [Blinky-plus](https://github.com/stiiven-dev/blinky-plus) for what that means in practice
+  for this series.
+
+## Filter choosing
+
+- raw is too noisy and wiggly , ema and median smoothes it good when its constant (check the plot
+  below): ![const image](docs/images/const.png)
+- median is better for random instant spikes while keeping sharp real ones.
+- also median lags behind whenever there's a rapid change between rising and
+  falling: ![median lags](docs/images/median_late.png)
+- ema is better in those constant phases and slow changes.
+
+#### Final verdict:
+
+Since our case is mostly constant and slow changes, EMA is the better option for this project.
 
 ## License
 
