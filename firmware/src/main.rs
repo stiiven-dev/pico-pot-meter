@@ -18,7 +18,7 @@ use hal::{
 };
 use rp2040_hal::{self as hal, adc::AdcPin, rom_data, Adc};
 
-use pot_core::/*raw_to_percent,*/ Ema;
+use pot_core::Ema;
 use usb_device::{class_prelude::*, prelude::*};
 use usbd_serial::SerialPort;
 
@@ -51,7 +51,7 @@ impl embedded_io::Write for DefmtUsbWriter {
                     match serial.write(&buf[written..]) {
                         Ok(n) => written += n,
                         Err(UsbError::WouldBlock) => {} // try again next loop
-                        Err(_) => return, // real error, give up on this frame
+                        Err(_) => (),               // real error, give up on this frame
                     }
                 }
             });
@@ -114,8 +114,8 @@ fn main() -> ! {
         &mut pac.RESETS,
         &mut watchdog,
     )
-        .ok()
-        .unwrap();
+    .ok()
+    .unwrap();
 
     //SIO gives access to GPIO
     let sio = Sio::new(pac.SIO);
@@ -177,7 +177,7 @@ fn main() -> ! {
         HOLD_TICKS,
         now0,
     )
-        .unwrap();
+    .unwrap();
     //median filtering
     let mut median_buff: [u16; MEDIAN_WINDOW] = [0; MEDIAN_WINDOW];
     let mut median_idx = 0;
@@ -229,6 +229,11 @@ fn main() -> ! {
         //
         // }
         //doing it asap for plotting purposes
-        defmt::info!("PLOT raw={=u16} ema={=u16} median={=u16}", pot1_raw, pot1_smoothed as u16, pot1_median);
+        defmt::info!(
+            "PLOT raw={=u16} ema={=u16} median={=u16}",
+            pot1_raw,
+            pot1_smoothed as u16,
+            pot1_median
+        );
     }
 }
