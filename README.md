@@ -23,10 +23,10 @@ Two potentiometers driving an OLED bar-graph meter, with a calibration routine â
 ## To-Do list
 
 - [x] raw ADC read, logged over defmt
+- [x] host tests for `raw_to_percent` (clamping, inverted pot)
 - [x] filter comparison: raw vs EMA vs median ([Filter choosing](#filter-choosing))
 - [ ] OLED bring-up + bar graph rendering
 - [ ] calibration routine (hold-both-extremes) + RAM persistence
-- [ ] host tests for `raw_to_percent` (clamping, inverted pot)
 - [ ] CI green
 - [ ] `v0.1.0` release
 

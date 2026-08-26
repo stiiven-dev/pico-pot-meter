@@ -51,7 +51,7 @@ impl embedded_io::Write for DefmtUsbWriter {
                     match serial.write(&buf[written..]) {
                         Ok(n) => written += n,
                         Err(UsbError::WouldBlock) => {} // try again next loop
-                        Err(_) => (),               // real error, give up on this frame
+                        Err(_) => (),                   // real error, give up on this frame
                     }
                 }
             });
