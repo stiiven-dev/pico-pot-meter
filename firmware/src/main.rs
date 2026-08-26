@@ -4,9 +4,21 @@
 mod debouncer;
 use debouncer::{ButtonEvent, ButtonMonitor};
 
+use embedded_graphics::{
+    mono_font::{ascii::FONT_10X20, MonoTextStyle},
+    pixelcolor::BinaryColor,
+    prelude::*,
+    primitives::{Arc, PrimitiveStyleBuilder, StrokeAlignment},
+    text::{Alignment, Baseline, TextStyleBuilder},
+};
+use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
+
 use core::cell::RefCell;
+use core::fmt::Write as _;
 use cortex_m_rt::entry;
 use critical_section::Mutex;
+use embedded_graphics::text::Text;
+use embedded_hal::delay::DelayNs;
 //use embedded_hal::digital::OutputPin;
 use static_cell::StaticCell;
 
@@ -16,9 +28,9 @@ use hal::{
     clocks::init_clocks_and_plls, gpio::Pins, pac, sio::Sio, timer::Timer, usb::UsbBus,
     watchdog::Watchdog,
 };
+use pot_core::{raw_to_percent, Ema};
+use rp2040_hal::fugit::RateExtU32;
 use rp2040_hal::{self as hal, adc::AdcPin, rom_data, Adc};
-
-use pot_core::Ema;
 use usb_device::{class_prelude::*, prelude::*};
 use usbd_serial::SerialPort;
 
@@ -32,8 +44,7 @@ const HOLD_TICKS: u64 = 1_500_000;
 //Other consts
 const OVERSAMPLE_COUNT: u32 = 32;
 const ALPHA: f32 = 0.2;
-//const PRINT_RATE: u64 = 500_000;
-const MEDIAN_WINDOW: usize = 5;
+const PRINT_RATE: u64 = 500_000;
 
 struct DefmtUsbWriter;
 
@@ -79,12 +90,6 @@ fn poll_usb() {
     });
 }
 
-fn median_of(buf: &[u16; MEDIAN_WINDOW]) -> u16 {
-    let mut sorted = *buf;
-    sorted.sort_unstable();
-    sorted[MEDIAN_WINDOW / 2]
-}
-
 static WRITER: StaticCell<DefmtUsbWriter> = StaticCell::new();
 static USB_BUS: StaticCell<UsbBusAllocator<UsbBus>> = StaticCell::new();
 
@@ -114,8 +119,8 @@ fn main() -> ! {
         &mut pac.RESETS,
         &mut watchdog,
     )
-    .ok()
-    .unwrap();
+        .ok()
+        .unwrap();
 
     //SIO gives access to GPIO
     let sio = Sio::new(pac.SIO);
@@ -127,19 +132,30 @@ fn main() -> ! {
         sio.gpio_bank0,
         &mut pac.RESETS,
     );
+    //Enable I2C peripheral
+    let sda = pins.gpio4.reconfigure::<hal::gpio::FunctionI2C, hal::gpio::PullUp>();
+    let scl = pins.gpio5.reconfigure::<hal::gpio::FunctionI2C, hal::gpio::PullUp>();
+    let i2c = rp2040_hal::I2C::i2c0(
+        pac.I2C0,
+        sda,
+        scl,
+        400.kHz(),
+        &mut pac.RESETS,
+        &clocks.peripheral_clock,
+    );
 
     //Enable ADC peripheral
     let mut adc = Adc::new(pac.ADC, &mut pac.RESETS);
 
     //enable Adc pin 0 and 1
     let mut adc_pin0 = AdcPin::new(pins.gpio26.into_floating_input()).unwrap();
-    //let mut adc_pin1 = AdcPin::new(pins.gpio27.into_floating_input()).unwrap();
+    let mut adc_pin1 = AdcPin::new(pins.gpio27.into_floating_input()).unwrap();
 
     //GPIO12 as button (pin 16)
     let button_pin = pins.gpio12.into_pull_up_input();
 
     //Timer
-    let timer = Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
+    let mut timer = Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
     //USB comms
     let usb_bus = USB_BUS.init(UsbBusAllocator::new(UsbBus::new(
         pac.USBCTRL_REGS,
@@ -177,16 +193,33 @@ fn main() -> ! {
         HOLD_TICKS,
         now0,
     )
-    .unwrap();
-    //median filtering
-    let mut median_buff: [u16; MEDIAN_WINDOW] = [0; MEDIAN_WINDOW];
-    let mut median_idx = 0;
+        .unwrap();
 
     //EMA init
     let mut ema1 = Ema::new(ALPHA);
+    let mut ema2 = Ema::new(ALPHA);
     //will show info in slower rate so we can read
-    //let mut last_time = 0u64;
+    let mut last_time = 0u64;
+
+    // Create styles used by the drawing operations.
+    let arc_stroke = PrimitiveStyleBuilder::new()
+        .stroke_color(BinaryColor::On)
+        .stroke_width(5)
+        .stroke_alignment(StrokeAlignment::Inside)
+        .build();
+    let character_style = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
+    let text_style = TextStyleBuilder::new()
+        .baseline(Baseline::Middle)
+        .alignment(Alignment::Center)
+        .build();
+
+
+    //Display init
+    let interface = I2CDisplayInterface::new(i2c);
+    let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0).into_buffered_graphics_mode();
+    display.init().unwrap();
     loop {
+        display.clear(BinaryColor::Off).unwrap();
         poll_usb();
         let now = timer.get_counter().ticks();
         match button.update(now).unwrap() {
@@ -208,32 +241,54 @@ fn main() -> ! {
         }
         //oversampling
         let mut pot1_sum: u32 = 0; //u32 because worst case scenario is 131_040 which surpasses u16::MAX
+        let mut pot2_sum: u32 = 0;
 
         for _ in 0..OVERSAMPLE_COUNT {
             let raw_val1 = adc.read(&mut adc_pin0).unwrap();
+            let raw_val2 = adc.read(&mut adc_pin1).unwrap();
             pot1_sum += raw_val1 as u32;
+            pot2_sum += raw_val2 as u32;
         }
         let pot1_raw = (pot1_sum / OVERSAMPLE_COUNT) as u16;
-        //moving median
-        median_buff[median_idx] = pot1_raw;
-        median_idx = (median_idx + 1) % MEDIAN_WINDOW;
-        let pot1_median = median_of(&median_buff);
+        let pot2_raw = (pot2_sum / OVERSAMPLE_COUNT) as u16;
 
         //EMA
         let pot1_smoothed = ema1.update(pot1_raw as f32);
+        let pot2_smoothed = ema2.update(pot2_raw as f32);
         //suppose min and max until calibration
-        //let pct1 = raw_to_percent(pot1_smoothed as u16, 0, 4095);
-        // let now = timer.get_counter().ticks();
-        // if now - last_time >= PRINT_RATE {
-        //     last_time = now;
-        //
-        // }
-        //doing it asap for plotting purposes
-        defmt::info!(
-            "PLOT raw={=u16} ema={=u16} median={=u16}",
-            pot1_raw,
+        let pct1 = raw_to_percent(pot1_smoothed as u16, 0, 4095);
+        let sweep = pct1 as f32 * 360.0 / 100.0;
+
+
+        //let pct2 = raw_to_percent(pot2_smoothed as u16, 0, 4095);
+
+        let now = timer.get_counter().ticks();
+        if now - last_time >= PRINT_RATE {
+            last_time = now;
+            defmt::info!(
+            "ema1={=u16} ema2={=u16}",
             pot1_smoothed as u16,
-            pot1_median
+            pot2_smoothed as u16
         );
+        }
+        //drawing
+        Arc::new(Point::new(2, 2), 64 - 4, 90.0.deg(), sweep.deg())
+            .into_styled(arc_stroke)
+            .draw(&mut display)
+            .unwrap();
+
+        let mut buf = heapless::String::<8>::new();
+        let _ = write!(buf, "{}%", pct1);
+
+        Text::with_text_style(
+            &buf,
+            display.bounding_box().center(),
+            character_style,
+            text_style,
+        )
+            .draw(&mut display).unwrap();
+
+        display.flush().unwrap();
+        timer.delay_ms(50);
     }
 }
