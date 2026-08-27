@@ -18,7 +18,6 @@ use core::fmt::Write as _;
 use cortex_m_rt::entry;
 use critical_section::Mutex;
 use embedded_graphics::text::Text;
-use embedded_hal::delay::DelayNs;
 //use embedded_hal::digital::OutputPin;
 use static_cell::StaticCell;
 
@@ -38,13 +37,15 @@ type UsbState = (UsbDevice<'static, UsbBus>, SerialPort<'static, UsbBus>);
 static USB_STATE: Mutex<RefCell<Option<UsbState>>> = Mutex::new(RefCell::new(None));
 
 // --- Button-triggered behavior tuning (timer ticks = microseconds) ---
-const DEBOUNCE_TICKS: u64 = 20_000;
+const DEBOUNCE_TICKS: u64 = 10_000;
 const MULTI_CLICKS_WINDOW_TICKS: u64 = 400_000;
 const HOLD_TICKS: u64 = 1_500_000;
-//Other consts
+// --- Other consts ---
 const OVERSAMPLE_COUNT: u32 = 32;
 const ALPHA: f32 = 0.2;
 const PRINT_RATE: u64 = 500_000;
+const POLL_BUTTON_TICKS: u64 = 5_000;
+const DISPLAY_PERIOD_TICKS: u64 = 50_000; //instead of delay_ms(50)
 
 struct DefmtUsbWriter;
 
@@ -55,19 +56,29 @@ impl embedded_io::ErrorType for DefmtUsbWriter {
 impl embedded_io::Write for DefmtUsbWriter {
     fn write(&mut self, buf: &[u8]) -> Result<usize, Self::Error> {
         let mut written = 0;
-        while written < buf.len() {
+        let mut idle_polls = 0u32;
+        const MAX_IDLE_POLLS: u32 = 200; // bound the spin — drop the rest if host isn't draining
+
+        while written < buf.len() && idle_polls < MAX_IDLE_POLLS {
             critical_section::with(|cs| {
                 if let Some((usb_dev, serial)) = USB_STATE.borrow_ref_mut(cs).as_mut() {
                     usb_dev.poll(&mut [serial]);
                     match serial.write(&buf[written..]) {
-                        Ok(n) => written += n,
-                        Err(UsbError::WouldBlock) => {} // try again next loop
-                        Err(_) => (),                   // real error, give up on this frame
+                        Ok(n) if n > 0 => {
+                            written += n;
+                            idle_polls = 0; // reset — we're making progress
+                        }
+                        Ok(_) | Err(UsbError::WouldBlock) => {
+                            idle_polls += 1;
+                        }
+                        Err(_) => idle_polls = MAX_IDLE_POLLS, // bail on real errors
                     }
                 }
             });
         }
-        Ok(written)
+        // Whether we wrote everything or gave up, tell the caller it's done —
+        // dropping unsent log bytes is fine; hanging the app is not.
+        Ok(buf.len())
     }
 
     fn flush(&mut self) -> Result<(), Self::Error> {
@@ -119,8 +130,8 @@ fn main() -> ! {
         &mut pac.RESETS,
         &mut watchdog,
     )
-        .ok()
-        .unwrap();
+    .ok()
+    .unwrap();
 
     //SIO gives access to GPIO
     let sio = Sio::new(pac.SIO);
@@ -133,8 +144,12 @@ fn main() -> ! {
         &mut pac.RESETS,
     );
     //Enable I2C peripheral
-    let sda = pins.gpio4.reconfigure::<hal::gpio::FunctionI2C, hal::gpio::PullUp>();
-    let scl = pins.gpio5.reconfigure::<hal::gpio::FunctionI2C, hal::gpio::PullUp>();
+    let sda = pins
+        .gpio4
+        .reconfigure::<hal::gpio::FunctionI2C, hal::gpio::PullUp>();
+    let scl = pins
+        .gpio5
+        .reconfigure::<hal::gpio::FunctionI2C, hal::gpio::PullUp>();
     let i2c = rp2040_hal::I2C::i2c0(
         pac.I2C0,
         sda,
@@ -155,7 +170,7 @@ fn main() -> ! {
     let button_pin = pins.gpio12.into_pull_up_input();
 
     //Timer
-    let mut timer = Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
+    let timer = Timer::new(pac.TIMER, &mut pac.RESETS, &clocks);
     //USB comms
     let usb_bus = USB_BUS.init(UsbBusAllocator::new(UsbBus::new(
         pac.USBCTRL_REGS,
@@ -193,13 +208,15 @@ fn main() -> ! {
         HOLD_TICKS,
         now0,
     )
-        .unwrap();
+    .unwrap();
 
     //EMA init
     let mut ema1 = Ema::new(ALPHA);
     let mut ema2 = Ema::new(ALPHA);
-    //will show info in slower rate so we can read
-    let mut last_time = 0u64;
+    //needed time for different events
+    let mut info_last_time = 0u64;
+    let mut button_last_time = 0u64;
+    let mut display_last_time = 0u64;
 
     // Create styles used by the drawing operations.
     let arc_stroke = PrimitiveStyleBuilder::new()
@@ -213,82 +230,86 @@ fn main() -> ! {
         .alignment(Alignment::Center)
         .build();
 
-
     //Display init
     let interface = I2CDisplayInterface::new(i2c);
-    let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0).into_buffered_graphics_mode();
+    let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
+        .into_buffered_graphics_mode();
     display.init().unwrap();
+
     loop {
         display.clear(BinaryColor::Off).unwrap();
         poll_usb();
         let now = timer.get_counter().ticks();
-        match button.update(now).unwrap() {
-            ButtonEvent::HoldTriggered => {
-                defmt::info!("should calibrate")
+        if now.wrapping_sub(button_last_time) >= POLL_BUTTON_TICKS {
+            button_last_time = now;
+            match button.update(now).unwrap() {
+                ButtonEvent::HoldTriggered => {
+                    defmt::info!("should calibrate")
+                }
+                ButtonEvent::Clicks(n) if n >= 3 => {
+                    defmt::warn!("button held — rebooting into flash");
+                    // Give the USB writer a chance to flush the log line above
+                    // before we reset (best-effort; no delay primitive wired
+                    // in yet, so this is a very rough flush attempt).
+                    poll_usb();
+                    rom_data::reset_to_usb_boot(0, 0);
+                }
+                ButtonEvent::Clicks(n) => {
+                    defmt::info!("clicked {} time(s)", n);
+                }
+                ButtonEvent::None => {}
             }
-            ButtonEvent::Clicks(n) if n >= 3 => {
-                defmt::warn!("button held — rebooting into flash");
-                // Give the USB writer a chance to flush the log line above
-                // before we reset (best-effort; no delay primitive wired
-                // in yet, so this is a very rough flush attempt).
-                poll_usb();
-                rom_data::reset_to_usb_boot(0, 0);
+        }
+
+        if now.wrapping_sub(display_last_time) >= DISPLAY_PERIOD_TICKS {
+            //oversampling
+            let mut pot1_sum: u32 = 0; //u32 because worst case scenario is 131_040 which surpasses u16::MAX
+            let mut pot2_sum: u32 = 0;
+
+            for _ in 0..OVERSAMPLE_COUNT {
+                let raw_val1 = adc.read(&mut adc_pin0).unwrap();
+                let raw_val2 = adc.read(&mut adc_pin1).unwrap();
+                pot1_sum += raw_val1 as u32;
+                pot2_sum += raw_val2 as u32;
             }
-            ButtonEvent::Clicks(n) => {
-                defmt::info!("clicked {} time(s)", n);
+            let pot1_raw = (pot1_sum / OVERSAMPLE_COUNT) as u16;
+            let pot2_raw = (pot2_sum / OVERSAMPLE_COUNT) as u16;
+
+            //EMA
+            let pot1_smoothed = ema1.update(pot1_raw as f32);
+            let pot2_smoothed = ema2.update(pot2_raw as f32);
+            //suppose min and max until calibration
+            let pct1 = raw_to_percent(pot1_smoothed as u16, 0, 4095);
+            let sweep = pct1 as f32 * 360.0 / 100.0;
+            //let pct2 = raw_to_percent(pot2_smoothed as u16, 0, 4095);
+
+            if now - info_last_time >= PRINT_RATE {
+                info_last_time = now;
+                defmt::info!(
+                    "ema1={=u16} ema2={=u16}",
+                    pot1_smoothed as u16,
+                    pot2_smoothed as u16
+                );
             }
-            ButtonEvent::None => {}
-        }
-        //oversampling
-        let mut pot1_sum: u32 = 0; //u32 because worst case scenario is 131_040 which surpasses u16::MAX
-        let mut pot2_sum: u32 = 0;
+            display_last_time = now;
+            //drawing
+            Arc::new(Point::new(2, 2), 64 - 4, 90.0.deg(), sweep.deg())
+                .into_styled(arc_stroke)
+                .draw(&mut display)
+                .unwrap();
 
-        for _ in 0..OVERSAMPLE_COUNT {
-            let raw_val1 = adc.read(&mut adc_pin0).unwrap();
-            let raw_val2 = adc.read(&mut adc_pin1).unwrap();
-            pot1_sum += raw_val1 as u32;
-            pot2_sum += raw_val2 as u32;
-        }
-        let pot1_raw = (pot1_sum / OVERSAMPLE_COUNT) as u16;
-        let pot2_raw = (pot2_sum / OVERSAMPLE_COUNT) as u16;
+            let mut buf = heapless::String::<8>::new();
+            let _ = write!(buf, "{}%", pct1);
 
-        //EMA
-        let pot1_smoothed = ema1.update(pot1_raw as f32);
-        let pot2_smoothed = ema2.update(pot2_raw as f32);
-        //suppose min and max until calibration
-        let pct1 = raw_to_percent(pot1_smoothed as u16, 0, 4095);
-        let sweep = pct1 as f32 * 360.0 / 100.0;
-
-
-        //let pct2 = raw_to_percent(pot2_smoothed as u16, 0, 4095);
-
-        let now = timer.get_counter().ticks();
-        if now - last_time >= PRINT_RATE {
-            last_time = now;
-            defmt::info!(
-            "ema1={=u16} ema2={=u16}",
-            pot1_smoothed as u16,
-            pot2_smoothed as u16
-        );
-        }
-        //drawing
-        Arc::new(Point::new(2, 2), 64 - 4, 90.0.deg(), sweep.deg())
-            .into_styled(arc_stroke)
+            Text::with_text_style(
+                &buf,
+                display.bounding_box().center(),
+                character_style,
+                text_style,
+            )
             .draw(&mut display)
             .unwrap();
-
-        let mut buf = heapless::String::<8>::new();
-        let _ = write!(buf, "{}%", pct1);
-
-        Text::with_text_style(
-            &buf,
-            display.bounding_box().center(),
-            character_style,
-            text_style,
-        )
-            .draw(&mut display).unwrap();
-
-        display.flush().unwrap();
-        timer.delay_ms(50);
+            display.flush().unwrap();
+        }
     }
 }
