@@ -5,11 +5,11 @@ mod debouncer;
 use debouncer::{ButtonEvent, ButtonMonitor};
 
 use embedded_graphics::{
-    mono_font::{ascii::FONT_10X20, MonoTextStyle},
+    mono_font::{ascii::FONT_6X10, MonoTextStyle},
     pixelcolor::BinaryColor,
     prelude::*,
-    primitives::{Arc, PrimitiveStyleBuilder, StrokeAlignment},
-    text::{Alignment, Baseline, TextStyleBuilder},
+    primitives::{PrimitiveStyle, Rectangle},
+    text::Text,
 };
 use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306};
 
@@ -17,8 +17,6 @@ use core::cell::RefCell;
 use core::fmt::Write as _;
 use cortex_m_rt::entry;
 use critical_section::Mutex;
-use embedded_graphics::text::Text;
-//use embedded_hal::digital::OutputPin;
 use static_cell::StaticCell;
 
 use panic_persist as _;
@@ -27,7 +25,7 @@ use hal::{
     clocks::init_clocks_and_plls, gpio::Pins, pac, sio::Sio, timer::Timer, usb::UsbBus,
     watchdog::Watchdog,
 };
-use pot_core::{raw_to_percent, Ema};
+use pot_core::{bar_fill_height, raw_to_percent, Ema};
 use rp2040_hal::fugit::RateExtU32;
 use rp2040_hal::{self as hal, adc::AdcPin, rom_data, Adc};
 use usb_device::{class_prelude::*, prelude::*};
@@ -46,6 +44,9 @@ const ALPHA: f32 = 0.2;
 const PRINT_RATE: u64 = 500_000;
 const POLL_BUTTON_TICKS: u64 = 5_000;
 const DISPLAY_PERIOD_TICKS: u64 = 50_000; //instead of delay_ms(50)
+const BAR_WIDTH: u32 = 40;
+const BAR_MAX_HEIGHT: u32 = 40;
+const BAR_Y_BASE: i32 = 50; // bottom of the bar area
 
 struct DefmtUsbWriter;
 
@@ -99,6 +100,47 @@ fn poll_usb() {
             usb_dev.poll(&mut [serial]);
         }
     });
+}
+
+fn draw_bars<D>(display: &mut D, pot1_pct: u8, pot2_pct: u8) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = BinaryColor>,
+{
+    display.clear(BinaryColor::Off)?;
+    draw_one_bar(display, 10, pot1_pct)?;
+    draw_one_bar(display, 70, pot2_pct)?;
+    Ok(())
+}
+
+fn draw_one_bar<D>(display: &mut D, x: i32, pct: u8) -> Result<(), D::Error>
+where
+    D: DrawTarget<Color = BinaryColor>,
+{
+    let fill_height = bar_fill_height(pct, BAR_MAX_HEIGHT);
+
+    // outline, full height
+    Rectangle::new(
+        Point::new(x, BAR_Y_BASE - BAR_MAX_HEIGHT as i32),
+        Size::new(BAR_WIDTH, BAR_MAX_HEIGHT),
+    )
+    .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+    .draw(display)?;
+
+    // filled portion, grows upward from the base
+    Rectangle::new(
+        Point::new(x, BAR_Y_BASE - fill_height as i32),
+        Size::new(BAR_WIDTH, fill_height),
+    )
+    .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+    .draw(display)?;
+
+    // percentage label underneath
+    let style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+    let mut buf = heapless::String::<8>::new();
+    let _ = write!(buf, "{}%", pct);
+    Text::new(&buf, Point::new(x, BAR_Y_BASE + 10), style).draw(display)?;
+
+    Ok(())
 }
 
 static WRITER: StaticCell<DefmtUsbWriter> = StaticCell::new();
@@ -218,18 +260,6 @@ fn main() -> ! {
     let mut button_last_time = 0u64;
     let mut display_last_time = 0u64;
 
-    // Create styles used by the drawing operations.
-    let arc_stroke = PrimitiveStyleBuilder::new()
-        .stroke_color(BinaryColor::On)
-        .stroke_width(5)
-        .stroke_alignment(StrokeAlignment::Inside)
-        .build();
-    let character_style = MonoTextStyle::new(&FONT_10X20, BinaryColor::On);
-    let text_style = TextStyleBuilder::new()
-        .baseline(Baseline::Middle)
-        .alignment(Alignment::Center)
-        .build();
-
     //Display init
     let interface = I2CDisplayInterface::new(i2c);
     let mut display = Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0)
@@ -237,7 +267,6 @@ fn main() -> ! {
     display.init().unwrap();
 
     loop {
-        display.clear(BinaryColor::Off).unwrap();
         poll_usb();
         let now = timer.get_counter().ticks();
         if now.wrapping_sub(button_last_time) >= POLL_BUTTON_TICKS {
@@ -280,8 +309,7 @@ fn main() -> ! {
             let pot2_smoothed = ema2.update(pot2_raw as f32);
             //suppose min and max until calibration
             let pct1 = raw_to_percent(pot1_smoothed as u16, 0, 4095);
-            let sweep = pct1 as f32 * 360.0 / 100.0;
-            //let pct2 = raw_to_percent(pot2_smoothed as u16, 0, 4095);
+            let pct2 = raw_to_percent(pot2_smoothed as u16, 0, 4095);
 
             if now - info_last_time >= PRINT_RATE {
                 info_last_time = now;
@@ -293,22 +321,7 @@ fn main() -> ! {
             }
             display_last_time = now;
             //drawing
-            Arc::new(Point::new(2, 2), 64 - 4, 90.0.deg(), sweep.deg())
-                .into_styled(arc_stroke)
-                .draw(&mut display)
-                .unwrap();
-
-            let mut buf = heapless::String::<8>::new();
-            let _ = write!(buf, "{}%", pct1);
-
-            Text::with_text_style(
-                &buf,
-                display.bounding_box().center(),
-                character_style,
-                text_style,
-            )
-            .draw(&mut display)
-            .unwrap();
+            draw_bars(&mut display, pct1, pct2).unwrap();
             display.flush().unwrap();
         }
     }

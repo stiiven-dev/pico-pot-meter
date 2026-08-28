@@ -54,6 +54,11 @@ impl Ema {
     }
 }
 
+pub fn bar_fill_height(pct: u8, max_height: u32) -> u32 {
+    let pct = pct.min(100) as u32;
+    (max_height * pct) / 100
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,5 +108,28 @@ mod tests {
             (last - 100.0).abs() < 1.0,
             "expected convergence near 100, got {last}"
         );
+    }
+
+    #[test]
+    fn bar_height_zero_percent_is_zero_pixels() {
+        assert_eq!(bar_fill_height(0, 50), 0);
+    }
+
+    #[test]
+    fn bar_height_hundred_percent_is_full_height() {
+        assert_eq!(bar_fill_height(100, 50), 50);
+    }
+
+    #[test]
+    fn bar_height_fifty_percent_is_half_height() {
+        assert_eq!(bar_fill_height(50, 50), 25);
+    }
+
+    #[test]
+    fn bar_height_clamps_above_100_percent() {
+        // Shouldn't happen given raw_to_percent's own clamping, but a
+        // bar-height function that trusts its input blindly is a bug
+        // waiting for a future caller — clamp defensively here too.
+        assert_eq!(bar_fill_height(150, 50), 50);
     }
 }
