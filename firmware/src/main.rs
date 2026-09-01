@@ -25,7 +25,7 @@ use hal::{
     clocks::init_clocks_and_plls, gpio::Pins, pac, sio::Sio, timer::Timer, usb::UsbBus,
     watchdog::Watchdog,
 };
-use pot_core::{bar_fill_height, raw_to_percent, Ema};
+use pot_core::{bar_fill_height, raw_to_percent, Calibration, Ema};
 use rp2040_hal::fugit::RateExtU32;
 use rp2040_hal::{self as hal, adc::AdcPin, rom_data, Adc};
 use usb_device::{class_prelude::*, prelude::*};
@@ -44,9 +44,9 @@ const ALPHA: f32 = 0.2;
 const PRINT_RATE: u64 = 500_000;
 const POLL_BUTTON_TICKS: u64 = 5_000;
 const DISPLAY_PERIOD_TICKS: u64 = 50_000; //instead of delay_ms(50)
-const BAR_WIDTH: u32 = 40;
-const BAR_MAX_HEIGHT: u32 = 40;
-const BAR_Y_BASE: i32 = 50; // bottom of the bar area
+const BAR_WIDTH: u32 = 20;
+const BAR_MAX_HEIGHT: u32 = 30;
+const BAR_Y_BASE: i32 = 40; // bottom of the bar area
 
 struct DefmtUsbWriter;
 
@@ -102,13 +102,22 @@ fn poll_usb() {
     });
 }
 
-fn draw_bars<D>(display: &mut D, pot1_pct: u8, pot2_pct: u8) -> Result<(), D::Error>
+fn draw_bars<D>(
+    display: &mut D,
+    pot1_pct: u8,
+    pot2_pct: u8,
+    calibrating: bool,
+) -> Result<(), D::Error>
 where
     D: DrawTarget<Color = BinaryColor>,
 {
     display.clear(BinaryColor::Off)?;
     draw_one_bar(display, 10, pot1_pct)?;
     draw_one_bar(display, 70, pot2_pct)?;
+    if calibrating {
+        let style = MonoTextStyle::new(&FONT_6X10, BinaryColor::On);
+        Text::new("CAL", Point::new(40, 30), style).draw(display)?;
+    }
     Ok(())
 }
 
@@ -266,6 +275,13 @@ fn main() -> ! {
         .into_buffered_graphics_mode();
     display.init().unwrap();
 
+    //Calibration init
+    let mut cal1 = Calibration::full_range();
+    let mut cal2 = Calibration::full_range();
+    let mut sweep1 = Calibration::start_sweep();
+    let mut sweep2 = Calibration::start_sweep();
+    let mut calibrating = false;
+
     loop {
         poll_usb();
         let now = timer.get_counter().ticks();
@@ -273,10 +289,30 @@ fn main() -> ! {
             button_last_time = now;
             match button.update(now).unwrap() {
                 ButtonEvent::HoldTriggered => {
-                    defmt::info!("should calibrate")
+                    if calibrating {
+                        if sweep1.is_valid() && sweep2.is_valid() {
+                            cal1 = sweep1;
+                            cal2 = sweep2;
+                            defmt::info!(
+                                "Calibration saved: pot1 {}...{}  pot2 {}...{}",
+                                cal1.min,
+                                cal1.max,
+                                cal2.min,
+                                cal2.max
+                            );
+                        } else {
+                            defmt::warn!("Calibration incomplete - pot wasn't swept, keeping previous values");
+                        }
+                        calibrating = false;
+                    } else {
+                        sweep1 = Calibration::start_sweep();
+                        sweep2 = Calibration::start_sweep();
+                        calibrating = true;
+                        defmt::info!("calibration started - sweep both pots, hold again to finish");
+                    }
                 }
                 ButtonEvent::Clicks(n) if n >= 3 => {
-                    defmt::warn!("button held — rebooting into flash");
+                    defmt::warn!("button pressed more than 3 times — rebooting into flash");
                     // Give the USB writer a chance to flush the log line above
                     // before we reset (best-effort; no delay primitive wired
                     // in yet, so this is a very rough flush attempt).
@@ -307,9 +343,14 @@ fn main() -> ! {
             //EMA
             let pot1_smoothed = ema1.update(pot1_raw as f32);
             let pot2_smoothed = ema2.update(pot2_raw as f32);
-            //suppose min and max until calibration
-            let pct1 = raw_to_percent(pot1_smoothed as u16, 0, 4095);
-            let pct2 = raw_to_percent(pot2_smoothed as u16, 0, 4095);
+
+            if calibrating {
+                sweep1.observe(pot1_smoothed as u16);
+                sweep2.observe(pot2_smoothed as u16);
+            }
+
+            let pct1 = raw_to_percent(pot1_smoothed as u16, cal1.min, cal1.max);
+            let pct2 = raw_to_percent(pot2_smoothed as u16, cal2.min, cal2.max);
 
             if now - info_last_time >= PRINT_RATE {
                 info_last_time = now;
@@ -321,7 +362,7 @@ fn main() -> ! {
             }
             display_last_time = now;
             //drawing
-            draw_bars(&mut display, pct1, pct2).unwrap();
+            draw_bars(&mut display, pct1, pct2, calibrating).unwrap();
             display.flush().unwrap();
         }
     }

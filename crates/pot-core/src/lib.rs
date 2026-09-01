@@ -59,6 +59,33 @@ pub fn bar_fill_height(pct: u8, max_height: u32) -> u32 {
     (max_height * pct) / 100
 }
 
+#[derive(Copy, Clone)]
+pub struct Calibration {
+    pub min: u16,
+    pub max: u16,
+}
+
+impl Calibration {
+    pub fn full_range() -> Self {
+        Self { min: 0, max: 4095 }
+    }
+
+    pub fn start_sweep() -> Self {
+        Self {
+            min: u16::MAX,
+            max: 0,
+        }
+    }
+
+    pub fn observe(&mut self, raw: u16) {
+        self.min = self.min.min(raw);
+        self.max = self.max.max(raw);
+    }
+
+    pub fn is_valid(&self) -> bool {
+        self.min < self.max
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,5 +158,32 @@ mod tests {
         // bar-height function that trusts its input blindly is a bug
         // waiting for a future caller — clamp defensively here too.
         assert_eq!(bar_fill_height(150, 50), 50);
+    }
+
+    #[test]
+    fn calibration_widens_as_samples_come_in() {
+        let mut cal = Calibration::start_sweep();
+        cal.observe(1500);
+        cal.observe(300);
+        cal.observe(3900);
+        cal.observe(2000); // inside the current range — shouldn't change bounds
+        assert_eq!(cal.min, 300);
+        assert_eq!(cal.max, 3900);
+    }
+
+    #[test]
+    fn calibration_single_sample_is_invalid() {
+        // pot never actually moved during the sweep window
+        let mut cal = Calibration::start_sweep();
+        cal.observe(2048);
+        assert!(!cal.is_valid());
+    }
+
+    #[test]
+    fn calibration_after_real_sweep_is_valid() {
+        let mut cal = Calibration::start_sweep();
+        cal.observe(100);
+        cal.observe(4000);
+        assert!(cal.is_valid());
     }
 }
