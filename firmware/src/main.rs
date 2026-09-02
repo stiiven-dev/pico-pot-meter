@@ -232,7 +232,7 @@ fn main() -> ! {
     )));
     let serial = SerialPort::new(usb_bus);
     let usb_dev = UsbDeviceBuilder::new(usb_bus, UsbVidPid(0x16c0, 0x27dd))
-        .strings(&[StringDescriptors::new(LangID::EN).product("blinky-plus")])
+        .strings(&[StringDescriptors::new(LangID::EN).product("pico-pot-meter")])
         .unwrap()
         .device_class(usbd_serial::USB_CLASS_CDC)
         .build();

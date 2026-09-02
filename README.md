@@ -2,11 +2,9 @@
 
 Two potentiometers driving an OLED bar-graph meter, with a calibration routine — no debug probe required.
 
-<!-- TODO: hero photo of the breadboard -->
-`docs/images/breadboard.jpg`
+![breadboard](docs/images/breadboard.png)
 
-<!-- TODO: demo GIF — bars moving as pots turn, then the calibration routine -->
-`docs/images/demo.gif`
+[Demo Video Here](docs/videos/demo.mp4)
 
 ---
 
@@ -25,16 +23,15 @@ Two potentiometers driving an OLED bar-graph meter, with a calibration routine �
 - [x] raw ADC read, logged over defmt
 - [x] host tests for `raw_to_percent` (clamping, inverted pot)
 - [x] filter comparison: raw vs EMA vs median ([Filter choosing](#filter-choosing))
-- [ ] OLED bring-up + bar graph rendering
-- [ ] calibration routine (hold-both-extremes) + RAM persistence
-- [ ] CI green
-- [ ] `v0.1.0` release
+- [x] OLED bring-up + bar graph rendering
+- [x] calibration routine (hold-both-extremes) + RAM persistence
+- [x] CI green
 
 ## Hardware
 
 | Part                                  | Qty | Notes             |
 |---------------------------------------|-----|-------------------|
-| Raspberry Pi Pico W (or WH)           | 1   | RP2040 + CYW43439 |
+| Raspberry Pi Pico (W or WH)           | 1   | RP2040 + CYW43439 |
 | Potentiometer (10 kΩ)                 | 2   |                   |
 | SSD1306/SSD1309 0.96" 128×64 I²C OLED | 1   |                   |
 | Breadboard + jumper wires             | —   |                   |
@@ -53,7 +50,6 @@ No debug probe needed — same USB-only workflow as `blinky-plus`.
 | 3V3 (pin 36)  | Pot ends + OLED VCC |                              |
 | GND (pin 38)  | Common ground       | shared by both pots and OLED |
 
-<!-- TODO: docs/wiring.md with the full diagram -->
 No smoothing cap on the pot wipers in this build — filtering is done entirely in software (oversampling + EMA in
 `pot-core`); see that crate's docs for why.
 
@@ -68,7 +64,7 @@ cargo install defmt-print --locked
 cargo run --release -p firmware
 ```
 
-Watch logs the same way as `blinky-plus`
+Watch logs the same way as [Blinky-plus](https://github.com/stiiven-dev/blinky-plus)
 
 ```bash
 ./watch-defmt.sh target/thumbv6m-none-eabi/release/firmware
@@ -98,7 +94,7 @@ into `pot-core`, draw the result.
 ## Testing
 
 ```bash
-cargo test -p pot-core   # host tests: clamping, inverted pot, filter convergence
+cargo test -p pot-core --target x86_64-unknown-linux-gnu   # host tests: clamping, inverted pot, filter convergence
 cargo clippy --workspace --all-features -- -D warnings
 cargo fmt --all -- --check
 ```
